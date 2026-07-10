@@ -9,6 +9,49 @@ DATASET_PATH = ROOT / "dataset" / "Airbnb_Data.csv"
 EARTH_RADIUS = 6371
 TOP_NEIGHBOURHOODS = 209
 
+AMENITIES_REPLACEMENTS = {
+    "Firm matress": "Firm mattress",
+    "Elevator in building": "Elevator",
+    "Smartlock": "Smart lock",
+    "Doorman Entry": "Doorman",
+    "Wide clearance to shower & toilet": "Wide clearance to shower and toilet",
+    "smooth pathway to front door": "Flat smooth pathway to front door"
+}
+
+AMENITIES_REMOVE = {
+    "Flat",
+}
+
+AMENITIES_GROUPS = {
+    "Bathroom supplies": {
+        "Body soap",
+        "Hand soap",
+        "Bath towel",
+        "Hand or paper towel",
+        "Toilet paper"
+    }
+}
+
+DESCRIPTION_GARBAGE_OBSERVATION = {
+    '.',
+    '...',
+    '/',
+    'Dasfdfads',
+    'TEST!!',
+    'Test',
+    'Testing',
+    'Thanks!',
+    'a',
+    'asdfsafda',
+    'deleted',
+    'f',
+    'jkl',
+    'n',
+    'none',
+    's',
+    'sdsads',
+    'x'
+}
 
 def fill_host_response_rate(df):
     df['host_response_rate'] = pd.to_numeric(
@@ -208,15 +251,40 @@ def group_rare_neighbourhoods(df):
 class AmenitiesPreprocessor:
     def __init__(self):
         self._encoder = MultiLabelBinarizer()
+        
 
-    def transform(self, df):
+    def _prepare(self, df):
         df = self._create_amenities_list(df)
         df = self._remove_translation_missing_errors(df)
+        df = self._clean_spelling_logical_errors(df)
+        df = self._create_amenities_groups(df)
+
+        return df
+
+    def transform(self, df):
+        if 'amenities_list' not in df.columns:
+            df = self._prepare(df)
+
+        amenities_encoded_df = pd.DataFrame(
+            self._encoder.fit_transform(df['amenities_list']),
+            columns=self._encoder.classes_,
+            index=df.index
+        )
+
+        return amenities_encoded_df 
+    
+    def create_amenities_count(self, df):
+        if 'amenities_list' not in df.columns:
+            df = self._prepare(df)
+
+        df['amenities_count'] = df['amenities_list'].str.len()
+
+        return df
 
     def _create_amenities_list(self, df):
         df['amenities_list'] = df['amenities'].str.strip('{}') \
             .str.split(',') \
-            .apply(lambda x: [item.strip().strip('""') for item in x])
+            .apply(lambda x: [item.strip().strip('"') for item in x])
         
         return df
         
@@ -228,17 +296,52 @@ class AmenitiesPreprocessor:
         return df
     
     def _clean_spelling_logical_errors(self, df):
+        
         df['amenities_list'] = df['amenities_list'].apply(
-            lambda x: ["Firm mattress" if amenity == "Firm matress" else amenity for amenity in x]
+            lambda amenities: [
+                AMENITIES_REPLACEMENTS.get(amenity, amenity)
+                for amenity in amenities
+                if amenity not in AMENITIES_REMOVE
+            ]
         )
 
         df['amenities_list'] = df['amenities_list'].apply(
-            lambda x: ["Elevator" if amenity == "Elevator in building" else amenity for amenity in x]
+            lambda x: [amenity for amenity in x if amenity != ""]
         )
 
-        df['amenities_list'] = df['amenities_list'].apply(
-            lambda x: ["Doorman" if amenity == "Doorman Entry" else amenity for amenity in x]
-        )
+        return df
+    
+    def _create_amenities_groups(self, df):
+        def merge_amenities(amenities):
+            amenities = set(amenities)
+
+            for new_name, old_names in AMENITIES_GROUPS.items():
+                if amenities & old_names:
+                    amenities -= old_names
+                    amenities.add(new_name)
+
+            return sorted(amenities)
+        
+        df['amenities_list'] = df['amenities_list'].apply(merge_amenities)
+
+        return df
+    
+class DescriptionPreprocessor:
+    def __init__(self):
+            pass
+    
+    def _clean_garbage(self, df):
+        mask = df['description'].isin(DESCRIPTION_GARBAGE_OBSERVATION)
+        df.loc[mask, 'description'] = "No description"
+
+        return df
+    
+    def _fix_whitespaces(self, df):
+        df['description'] = df['description'] \
+            .str.replace(r'\.{4,}', '...', regex=True) \
+            .str.replace(r'([!?;:,])\1{2,}', 'r\1', regex=True)
+
+        return df
     
 def remove_columns(df):
     df.drop(columns=[
@@ -247,7 +350,9 @@ def remove_columns(df):
         "longitude",
         "latitude",
         "host_has_profile_pic",
-        "name"
+        "name",
+        "amenities_list",
+        "amenities"
     ], inplace=True)
 
 
@@ -271,7 +376,6 @@ def main():
     df_copy = create_distance_to_listing_center(df_copy)
 
     # Remove unnecessary columns
-    remove_columns(df_copy)
 
     # Categorical Features fixes
     df_copy = group_rare_property_types(df_copy)
@@ -279,7 +383,13 @@ def main():
     df_copy = group_rare_cancellation_policies(df_copy)
     df_copy = group_rare_neighbourhoods(df_copy)
 
-    print(df_copy['neighbourhood'].value_counts())
+    # Create amenities features and separate amenities encoded df
+    amenities_preprocessor = AmenitiesPreprocessor()
+    df_copy = amenities_preprocessor.create_amenities_count(df_copy)
+    amenities_encoded_df = amenities_preprocessor.transform(df_copy)
+
+    remove_columns(df_copy)
+    print(amenities_encoded_df.shape)
 
 if __name__ == "__main__":
     main()
