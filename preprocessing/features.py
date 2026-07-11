@@ -2,12 +2,16 @@ import pandas as pd
 from pathlib import Path
 import numpy as np
 from sklearn.preprocessing import MultiLabelBinarizer
+from sentence_transformers import SentenceTransformer
+import torch
 
 
 ROOT = Path.cwd().parent.resolve()
 DATASET_PATH = ROOT / "dataset" / "Airbnb_Data.csv"
+EMBEDDINGS_PATH = ROOT / "dataset" / "description-embeddings.parquet"
 EARTH_RADIUS = 6371
 TOP_NEIGHBOURHOODS = 209
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 AMENITIES_REPLACEMENTS = {
     "Firm matress": "Firm mattress",
@@ -327,9 +331,41 @@ class AmenitiesPreprocessor:
         return df
     
 class DescriptionPreprocessor:
-    def __init__(self):
-            pass
-    
+
+    def transform(self, df):
+        df['description'] = df['description'].astype("string[python]")
+
+        if EMBEDDINGS_PATH.exists():
+            print(f"Loading embeddings from Parquet {EMBEDDINGS_PATH}...")
+
+            embeddings_df = pd.read_parquet(EMBEDDINGS_PATH)
+        
+        else:
+            print(f"Generating Embeddings using: {DEVICE}")
+            
+            df = self._clean_garbage(df)
+            df = self._fix_whitespaces(df)
+            
+            model = SentenceTransformer("BAAI/bge-m3")
+            embeddings = model.encode(
+                df['description'].tolist(),
+                batch_size=32,
+                show_progress_bar=True,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                device=DEVICE
+            )
+
+            embeddings_df = pd.DataFrame(
+                embeddings,
+                columns=[f"emb_{i}" for i in range(embeddings.shape[1])]
+            )
+
+            embeddings_df.to_parquet(EMBEDDINGS_PATH, index=False)
+
+        return embeddings_df
+
+
     def _clean_garbage(self, df):
         mask = df['description'].isin(DESCRIPTION_GARBAGE_OBSERVATION)
         df.loc[mask, 'description'] = "No description"
@@ -352,7 +388,8 @@ def remove_columns(df):
         "host_has_profile_pic",
         "name",
         "amenities_list",
-        "amenities"
+        "amenities",
+        "description"
     ], inplace=True)
 
 
@@ -388,8 +425,12 @@ def main():
     df_copy = amenities_preprocessor.create_amenities_count(df_copy)
     amenities_encoded_df = amenities_preprocessor.transform(df_copy)
 
+    # Create description embedding DataFrame
+    description_preprocessor = DescriptionPreprocessor()
+    embeddings_df = description_preprocessor.transform(df_copy)
+
     remove_columns(df_copy)
-    print(amenities_encoded_df.shape)
+    print(embeddings_df.shape)
 
 if __name__ == "__main__":
     main()
