@@ -57,6 +57,11 @@ DESCRIPTION_GARBAGE_OBSERVATION = {
     'x'
 }
 
+BOOLEAN_FIX = {
+    "instant_bookable",
+    "host_identity_verified"
+}
+
 def fill_host_response_rate(df):
     df['host_response_rate'] = pd.to_numeric(
         df['host_response_rate'].str.replace("%", "", regex=False),
@@ -173,6 +178,21 @@ def fix_beds(df):
     df.loc[invalid_beds & multiple_guests, 'beds'] = (
         df.loc[invalid_beds & multiple_guests, 'accommodates'] - 1
     )
+
+    return df
+
+def fix_boolean_features(df):
+    mappings = {
+        "t": True,
+        "f": False
+    }
+
+    for col in BOOLEAN_FIX:
+        df[col] = df[col].map(mappings)
+        df[col] = df[col].fillna(-1).astype('int8')
+
+    boolean_features = df.select_dtypes(include=['bool']).columns
+    df[boolean_features] = df[boolean_features].astype('int8')
 
     return df
 
@@ -387,50 +407,110 @@ def remove_columns(df):
         "latitude",
         "host_has_profile_pic",
         "name",
-        "amenities_list",
         "amenities",
         "description"
     ], inplace=True)
 
+class FeatureBuilder:
 
-def main():
-    df = pd.read_csv(DATASET_PATH)
-    df_copy = df.copy()
+    def get_df(self, df, use_amenities=False, use_embeddings=False):
+        df = df.copy()
+        df = self._build_base_features(df)
 
-    # Fill missing values
-    df_copy = fill_host_response_rate(df_copy)
-    df_copy = fill_categorical_na_values(df_copy)
-    df_copy = fill_numerical_na_values(df_copy)
+        if use_amenities:
+            amenities_df = self.get_amenities_df(df)
+            df = df.join(amenities_df)
+            df.drop(columns=['amenities_list'], inplace=True)
 
-    # Create Datetime features and fill na values
-    df_copy = create_datetime_features(df_copy)
-    df_copy = fill_datetime_na_values(df_copy)
+        if use_embeddings:
+            embeddings_df = self.get_description_embeddings_df(df)
+            df = df.join(embeddings_df)
 
-    # Fix beds issue, when beds == 0
-    df_copy = fix_beds(df_copy)
+        remove_columns(df)
 
-    # Create a new feature based on latitude & longitude
-    df_copy = create_distance_to_listing_center(df_copy)
+        return df
 
-    # Remove unnecessary columns
+    def _build_base_features(self, df):
 
-    # Categorical Features fixes
-    df_copy = group_rare_property_types(df_copy)
-    df_copy = group_rare_bed_types(df_copy)
-    df_copy = group_rare_cancellation_policies(df_copy)
-    df_copy = group_rare_neighbourhoods(df_copy)
+        # Fix boolean features
+        df = fix_boolean_features(df)
 
-    # Create amenities features and separate amenities encoded df
-    amenities_preprocessor = AmenitiesPreprocessor()
-    df_copy = amenities_preprocessor.create_amenities_count(df_copy)
-    amenities_encoded_df = amenities_preprocessor.transform(df_copy)
+        # Fill missing values
+        df = fill_host_response_rate(df)
+        df = fill_categorical_na_values(df)
+        df = fill_numerical_na_values(df)
 
-    # Create description embedding DataFrame
-    description_preprocessor = DescriptionPreprocessor()
-    embeddings_df = description_preprocessor.transform(df_copy)
+        # Create Datetime features and fill na values
+        df = create_datetime_features(df)
+        df = fill_datetime_na_values(df)
 
-    remove_columns(df_copy)
-    print(embeddings_df.shape)
+        # Fix beds issue, when beds == 0
+        df = fix_beds(df)
 
-if __name__ == "__main__":
-    main()
+        # Create a new feature based on longitude and latitude
+        df = create_distance_to_listing_center(df)
+
+
+        # Categorical features fix
+        df = group_rare_bed_types(df)
+        df = group_rare_cancellation_policies(df)
+        df = group_rare_neighbourhoods(df)
+        df = group_rare_property_types(df)
+        
+        return df
+    
+    def get_amenities_df(self, df):
+        am_preprocessor = AmenitiesPreprocessor()
+        amenities_df = am_preprocessor.transform(df)
+
+        return amenities_df
+    
+    def get_description_embeddings_df(self, df):
+        embeddings_preprocessor = DescriptionPreprocessor()
+        embeddings_df = embeddings_preprocessor.transform(df)
+
+        return embeddings_df
+
+
+# def main():
+#     df = pd.read_csv(DATASET_PATH)
+#     df_copy = df.copy()
+
+#     df_copy = fix_boolean_features(df_copy)
+
+#     # Fill missing values
+#     df_copy = fill_host_response_rate(df_copy)
+#     df_copy = fill_categorical_na_values(df_copy)
+#     df_copy = fill_numerical_na_values(df_copy)
+
+#     # # Create Datetime features and fill na values
+#     df_copy = create_datetime_features(df_copy)
+#     df_copy = fill_datetime_na_values(df_copy)
+
+#     # # Fix beds issue, when beds == 0
+#     df_copy = fix_beds(df_copy)
+
+#     # # Create a new feature based on latitude & longitude
+#     df_copy = create_distance_to_listing_center(df_copy)
+
+#     # # Categorical Features fixes
+#     df_copy = group_rare_property_types(df_copy)
+#     df_copy = group_rare_bed_types(df_copy)
+#     df_copy = group_rare_cancellation_policies(df_copy)
+#     df_copy = group_rare_neighbourhoods(df_copy)
+
+#     # # Create amenities features and separate amenities encoded df
+#     # amenities_preprocessor = AmenitiesPreprocessor()
+#     # df_copy = amenities_preprocessor.create_amenities_count(df_copy)
+#     # amenities_encoded_df = amenities_preprocessor.transform(df_copy)
+
+#     # # Create description embedding DataFrame
+#     # description_preprocessor = DescriptionPreprocessor()
+#     # embeddings_df = description_preprocessor.transform(df_copy)
+
+#     remove_columns(df_copy)
+
+#     print(df_copy.isna().sum())
+
+# if __name__ == "__main__":
+#     main()
