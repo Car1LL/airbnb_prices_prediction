@@ -2,6 +2,7 @@ import pandas as pd
 from pathlib import Path
 import numpy as np
 from sklearn.preprocessing import MultiLabelBinarizer
+from sklearn.decomposition import PCA
 from sentence_transformers import SentenceTransformer
 import torch
 
@@ -352,7 +353,7 @@ class AmenitiesPreprocessor:
     
 class DescriptionPreprocessor:
 
-    def transform(self, df):
+    def transform(self, df, embedding_pca_components=None):
         df['description'] = df['description'].astype("string[python]")
 
         if EMBEDDINGS_PATH.exists():
@@ -382,6 +383,17 @@ class DescriptionPreprocessor:
             )
 
             embeddings_df.to_parquet(EMBEDDINGS_PATH, index=False)
+
+        if embedding_pca_components is not None:
+            pca = PCA(n_components=embedding_pca_components, random_state=42)
+            embeddings_pca = pca.fit_transform(embeddings_df)
+            embeddings_df = pd.DataFrame(
+                embeddings_pca,
+                index=df.index,
+                columns=[f"embedding_pca_{i}" for i in range(embeddings_pca.shape[1])]
+            )
+            print(f"Applying PCA ({embedding_pca_components} components)...")
+            print(f"Embeddings shape is: {embeddings_df.shape}")
 
         return embeddings_df
 
@@ -413,7 +425,10 @@ def remove_columns(df):
 
 class FeatureBuilder:
 
-    def get_df(self, df, use_amenities=False, use_embeddings=False):
+    def get_df(self, df, use_amenities=False, use_embeddings=False, embedding_pca_components=None):
+        if embedding_pca_components is not None and not use_embeddings:
+            raise ValueError("embedding_pca_components can only be used when use_embeddings=True")
+
         df = df.copy()
         df = self._build_base_features(df)
 
@@ -423,7 +438,7 @@ class FeatureBuilder:
             df.drop(columns=['amenities_list'], inplace=True)
 
         if use_embeddings:
-            embeddings_df = self.get_description_embeddings_df(df)
+            embeddings_df = self.get_description_embeddings_df(df, embedding_pca_components)
             df = df.join(embeddings_df)
 
         remove_columns(df)
@@ -465,9 +480,9 @@ class FeatureBuilder:
 
         return amenities_df
     
-    def get_description_embeddings_df(self, df):
+    def get_description_embeddings_df(self, df, embedding_pca_components=None):
         embeddings_preprocessor = DescriptionPreprocessor()
-        embeddings_df = embeddings_preprocessor.transform(df)
+        embeddings_df = embeddings_preprocessor.transform(df, embedding_pca_components)
 
         return embeddings_df
 
