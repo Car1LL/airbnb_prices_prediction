@@ -8,24 +8,33 @@ class XGBoostPipeline:
         self.booster = booster
         self.params = params
 
-    def fit(self, X_train, y_train, X_val, y_val, params):
+    def fit(self, X_train, y_train, params, X_val=None, y_val=None, num_boost_round=1000):
         self.preprocessor.fit(X_train, y_train)
         self.params = params.copy()
 
         X_train = self.preprocessor.transform(X_train)
-        X_val = self.preprocessor.transform(X_val)
-
         dtrain = xgb.DMatrix(X_train, label=y_train)
-        dval = xgb.DMatrix(X_val, label=y_val)
 
-        self.booster = xgb.train(
-            params=params,
-            dtrain=dtrain,
-            num_boost_round=1000,
-            evals=[(dval, "validation")],
-            early_stopping_rounds=30,
-            verbose_eval=False  
-        )
+        if X_val is not None and y_val is not None:
+            X_val = self.preprocessor.transform(X_val)
+            dval = xgb.DMatrix(X_val, label=y_val)
+
+            self.booster = xgb.train(
+                params=params,
+                dtrain=dtrain,
+                num_boost_round=num_boost_round,
+                evals=[(dval, 'validation')],
+                early_stopping_rounds=30,
+                verbose_eval=False
+            )   
+
+        else:
+            self.booster = xgb.train(
+                params=params,
+                dtrain=dtrain,
+                num_boost_round=num_boost_round,
+                verbose_eval=False
+            )
 
         return self
 
