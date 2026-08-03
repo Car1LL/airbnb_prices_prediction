@@ -7,3 +7,5 @@ __pycache__/
 dataset/
 
 artifacts/
+
+catboost_info/
