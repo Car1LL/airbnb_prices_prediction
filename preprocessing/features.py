@@ -7,7 +7,7 @@ from sentence_transformers import SentenceTransformer
 import torch
 
 
-ROOT = Path.cwd().parent.resolve()
+ROOT = Path(__file__).resolve().parent.parent
 DATASET_PATH = ROOT / "dataset" / "Airbnb_Data.csv"
 EMBEDDINGS_PATH = ROOT / "dataset" / "description-embeddings.parquet"
 EARTH_RADIUS = 6371
