@@ -4,11 +4,11 @@ from utils.xgb_pipeline import XGBoostPipeline
 from preprocessing.tree_preprocessor import create_tree_preprocessor
 from sklearn.model_selection import train_test_split
 from pathlib import Path
-import json
 from optuna_integration import XGBoostPruningCallback
 import xgboost as xgb
 import numpy as np
 import optuna
+from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_score
 
 
 EMBEDDING_PCA_COMPONENTS=370
@@ -64,6 +64,7 @@ def main():
     dtrain = xgb.DMatrix(X_train_processed, label=y_train)
     dtest = xgb.DMatrix(X_test_processed, label=y_test)
 
+    # Train model
     xgboost_pipeline = train_model(
         model_path=MODEL_PATH,
         dtrain=dtrain,
@@ -72,6 +73,35 @@ def main():
         y_train=y_train
     )
 
+    # Evaluate the model
+    train_pred_log = xgboost_pipeline.predict(X_train)
+    test_pred_log = xgboost_pipeline.predict(X_test)
+
+    evaluate(
+        y_train=y_train,
+        y_test=y_test,
+        train_pred_log=train_pred_log,
+        test_pred_log=test_pred_log
+    )
+
+
+def evaluate(y_train, y_test, train_pred_log, test_pred_log):
+    train_pred = np.exp(train_pred_log)
+    test_pred = np.exp(test_pred_log)
+
+    test_MAE = mean_absolute_error(np.exp(y_test), test_pred)
+    train_MAE = mean_absolute_error(np.exp(y_train), train_pred)
+
+    test_RMSE = root_mean_squared_error(np.exp(y_test), test_pred)
+    train_RMSE = root_mean_squared_error(np.exp(y_train), train_pred)
+
+    test_r2 = r2_score(y_test, test_pred_log)
+    train_r2 = r2_score(y_train, train_pred_log)
+
+    print(" Evaluation Metrics ".center(70, "="))
+    print(f"\nTest MAE: {test_MAE:.2f}$ | Train MAE: {train_MAE:.2f}$")
+    print(f"Test RMSE: {test_RMSE:.2f}$ | Train RMSE: {train_RMSE:.2f}$")
+    print(f"Test R2 Score: {test_r2:.2f} | Train R2 Score: {train_r2:.2f}")
 
 def train_model(model_path, dtrain, preprocessor, X_train, y_train):
     if (
@@ -120,7 +150,7 @@ def train_model(model_path, dtrain, preprocessor, X_train, y_train):
 
         xgboost_pipeline.save(model_path)
 
-    print(f"Model is located at: {model_path}")
+    print(f"\nModel is located at: {model_path}")
     return xgboost_pipeline
 
 def optuna_callback(study, trial):
