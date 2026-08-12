@@ -1,5 +1,6 @@
 import pandas as pd
-from preprocessing.features import FeatureBuilder
+import joblib
+from preprocessing.inference_features import InferenceFeatureBuilder
 from utils.xgb_pipeline import XGBoostPipeline
 from preprocessing.tree_preprocessor import create_tree_preprocessor
 from sklearn.model_selection import train_test_split
@@ -27,93 +28,87 @@ ALPHA = 0.03
 N_TRIALS=250
 
 def main():
+    df = pd.read_csv(DATASET_PATH)
 
-    # Load dataset
-    df = load_data(DATASET_PATH)
-    builder = FeatureBuilder()
-    df_copy = builder.get_df(
-        df,
+    builder = InferenceFeatureBuilder(
         use_amenities=True,
         use_embeddings=True,
         embedding_pca_components=EMBEDDING_PCA_COMPONENTS
     )
 
-    # X, y split
+    builder.fit(df)
+    df_copy = builder.transform(df)
+
     X = df_copy.drop(columns=['log_price'])
     y = df_copy['log_price']
 
-    # train test split
     X_train, X_test, y_train, y_test = train_test_split(
         X, y,
         random_state=42,
         test_size=0.2
     )
-
-    # Create preprocessor
+    
     cat_features = X_train.select_dtypes(include=['string', 'object']).columns
     tree_preprocessor = create_tree_preprocessor(cat_features)
 
-    # Create DMatrix 
-    tree_preprocessor.fit(X_train, y_train)
-
-    X_train_processed = tree_preprocessor.transform(X_train)
+    X_train_processed = tree_preprocessor.fit_transform(X_train, y_train)
     X_test_processed = tree_preprocessor.transform(X_test)
+
     X_train_processed = X_train_processed.astype(np.float32)
     X_test_processed = X_test_processed.astype(np.float32)
 
     dtrain = xgb.DMatrix(X_train_processed, label=y_train)
-    dtest = xgb.DMatrix(X_test_processed, label=y_test)
 
-    # Train model
-    xgboost_pipeline = train_model(
-        model_path=MODEL_PATH,
+    xgb_pipeline = train_model(
         dtrain=dtrain,
         preprocessor=tree_preprocessor,
         X_train=X_train,
         y_train=y_train
     )
 
-    # Evaluate the model
-    train_pred_log = xgboost_pipeline.predict(X_train)
-    test_pred_log = xgboost_pipeline.predict(X_test)
+    pred_train_log = xgb_pipeline.predict(X_train)
+    pred_test_log = xgb_pipeline.predict(X_test)
 
     evaluate(
+        pred_train_log=pred_train_log,
+        pred_test_log=pred_test_log,
         y_train=y_train,
-        y_test=y_test,
-        train_pred_log=train_pred_log,
-        test_pred_log=test_pred_log
+        y_test=y_test
     )
 
+def evaluate(pred_train_log, pred_test_log, y_train, y_test):
+    pred_train = np.exp(pred_train_log)
+    pred_test = np.exp(pred_test_log)
 
-def evaluate(y_train, y_test, train_pred_log, test_pred_log):
-    train_pred = np.exp(train_pred_log)
-    test_pred = np.exp(test_pred_log)
+    test_MAE = mean_absolute_error(np.exp(y_test), pred_test)
+    train_MAE = mean_absolute_error(np.exp(y_train), pred_train)
 
-    test_MAE = mean_absolute_error(np.exp(y_test), test_pred)
-    train_MAE = mean_absolute_error(np.exp(y_train), train_pred)
+    test_RMSE = root_mean_squared_error(np.exp(y_test), pred_test)
+    train_RMSE = root_mean_squared_error(np.exp(y_train), pred_train)
 
-    test_RMSE = root_mean_squared_error(np.exp(y_test), test_pred)
-    train_RMSE = root_mean_squared_error(np.exp(y_train), train_pred)
+    test_r2 = r2_score(y_test, pred_test_log)
+    train_r2 = r2_score(y_train, pred_train_log)
 
-    test_r2 = r2_score(y_test, test_pred_log)
-    train_r2 = r2_score(y_train, train_pred_log)
-
-    print(" Evaluation Metrics ".center(70, "="))
-    print(f"\nTest MAE: {test_MAE:.2f}$ | Train MAE: {train_MAE:.2f}$")
+    print("\n\n")
+    print(" Evaluation ".center(30, "="))
+    print(f"Test MAE: {test_MAE:.2f}$ | Train MAE: {train_MAE:.2f}$")
     print(f"Test RMSE: {test_RMSE:.2f}$ | Train RMSE: {train_RMSE:.2f}$")
     print(f"Test R2 Score: {test_r2:.2f} | Train R2 Score: {train_r2:.2f}")
 
-def train_model(model_path, dtrain, preprocessor, X_train, y_train):
-    if (
-        model_path.with_suffix(".json").exists() and
-        model_path.with_suffix(".joblib").exists() and 
-        model_path.with_suffix(".params").exists()
-    ):
-        print("Loading XGBoost model...")
-        xgboost_pipeline = XGBoostPipeline.load(model_path)
+
+def train_model(dtrain, preprocessor, X_train, y_train):
+
+    model_exists = (
+        MODEL_PATH.with_suffix(".json").exists() and
+        MODEL_PATH.with_suffix(".joblib").exists() and
+        MODEL_PATH.with_suffix(".params").exists()
+    )
+
+    if model_exists:
+        print(f"Loading existing model...")
+        xgb_pipeline = XGBoostPipeline.load(MODEL_PATH)
     else:
-        print("Training XGBoost model using Optuna...")
-        print(f"Model is being trained using: {DEVICE}")
+        print(f"Training model...")
         optuna.logging.set_verbosity(optuna.logging.WARNING)
 
         study = optuna.create_study(
@@ -128,7 +123,7 @@ def train_model(model_path, dtrain, preprocessor, X_train, y_train):
             callbacks=[optuna_callback]
         )
 
-        best_num_boost_round = study.best_trial.user_attrs['best_num_boost_round']
+        best_num_boost_rounds = study.best_trial.user_attrs['best_num_boost_round']
 
         best_params = {
             **study.best_params,
@@ -141,27 +136,16 @@ def train_model(model_path, dtrain, preprocessor, X_train, y_train):
             "device": DEVICE
         }
 
-        xgboost_pipeline = XGBoostPipeline(preprocessor=preprocessor)
-        xgboost_pipeline.fit(
+        xgb_pipeline = XGBoostPipeline(preprocessor=preprocessor)
+        xgb_pipeline.fit(
             X_train, y_train,
             params=best_params,
-            num_boost_round=best_num_boost_round
+            num_boost_round=best_num_boost_rounds
         )
 
-        xgboost_pipeline.save(model_path)
+        xgb_pipeline.save(MODEL_PATH)
 
-    print(f"\nModel is located at: {model_path}")
-    return xgboost_pipeline
-
-def optuna_callback(study, trial):
-    print(
-        f"Trial {trial.number + 1} / {N_TRIALS} "
-        f"| Score: {trial.value:.4f} "
-        f"| Best: {study.best_value:.4f}"
-    )
-
-def load_data(dataset_path):
-    return pd.read_csv(dataset_path)
+    return xgb_pipeline
     
 def objective(trial, dtrain, alpha=0.0):
 
@@ -216,6 +200,12 @@ def objective(trial, dtrain, alpha=0.0):
 
     return score
 
+def optuna_callback(study, trial):
+    print(
+        f"Trial {trial.number + 1}/{N_TRIALS} "
+        f"| Score: {trial.value:.4f} "
+        f"| Best: {study.best_value:.4f}"
+    )
 
 if __name__ == "__main__":
     main()
