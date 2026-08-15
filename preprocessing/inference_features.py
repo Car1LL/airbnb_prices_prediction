@@ -541,18 +541,28 @@ class DescriptionPreprocessor:
         df = df.copy()
 
         if EMBEDDINGS_PATH.exists():
+            print(f"Loading embedding parquet file from: {EMBEDDINGS_PATH}")
             embeddings_df = pd.read_parquet(EMBEDDINGS_PATH)
 
             if df.index.isin(embeddings_df.index).all():
                 return embeddings_df.loc[df.index]
-            
-        df['description'] = df['description'].astype("string[python]")
 
-        df = self._clean_garbage(df)
-        df = self._fix_whitespaces(df)
+        else:
+            embeddings_df = None
+
+        if embeddings_df is not None:
+            missing_mask = ~df.index.isin(embeddings_df.index)
+            missing_df = df.loc[missing_mask]
+        else:
+            missing_df = df
+
+        print(f"Generating embeddings for: {len(missing_df)} descriptions...")
+        missing_df['description'] = missing_df['description'].astype("string[python]")
+        missing_df = self._clean_garbage(missing_df)
+        missing_df = self._fix_whitespaces(missing_df)
 
         embeddings = self._embedding_model.encode(
-            df['description'].tolist(),
+            missing_df['description'].tolist(),
             batch_size=32,
             show_progress_bar=True,
             convert_to_numpy=True,
@@ -560,15 +570,23 @@ class DescriptionPreprocessor:
             device=DEVICE
         )
 
-        embeddings_df = pd.DataFrame(
+        new_embeddings_df = pd.DataFrame(
             embeddings,
-            index=df.index,
+            index=missing_df.index,
             columns=[f"emb_{i}" for i in range(embeddings.shape[1])]
         )
 
-        embeddings_df.to_parquet(EMBEDDINGS_PATH, index=False)
+        if embeddings_df is not None:
+            embeddings_df = pd.concat([
+                embeddings_df, new_embeddings_df
+            ])
 
-        return embeddings_df
+        else:
+            embeddings_df = new_embeddings_df
+
+        embeddings_df.to_parquet(EMBEDDINGS_PATH, index=True)
+
+        return embeddings_df.loc[df.index]
 
     def _clean_garbage(self, df):
         mask = df['description'].isin(DESCRIPTION_GARBAGE_OBSERVATION)
