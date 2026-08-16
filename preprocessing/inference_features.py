@@ -261,7 +261,7 @@ class InferenceFeatureBuilder:
     
     def _transform_host_response_rate(self, df):
         df['host_response_rate'] = pd.to_numeric(
-            df['host_response_rate'].str.replace("%", "", regex=False),
+            df['host_response_rate'].astype("string").str.replace("%", "", regex=False),
             errors="coerce"
         )
 
@@ -505,9 +505,20 @@ class AmenitiesPreprocessor:
 
 class DescriptionPreprocessor:
 
-    def __init__(self, embedding_pca_components=None):
+    def __init__(self, embedding_pca_components=None, use_cache=True):
         self.embedding_pca_components = embedding_pca_components
+        self.use_cache = use_cache
         self._pca = None
+        self._embedding_model = SentenceTransformer("BAAI/bge-m3", device=DEVICE)
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state['_embedding_model'] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+
         self._embedding_model = SentenceTransformer("BAAI/bge-m3", device=DEVICE)
 
     def fit(self, df):
@@ -540,13 +551,12 @@ class DescriptionPreprocessor:
     def _create_embeddings(self, df):
         df = df.copy()
 
-        if EMBEDDINGS_PATH.exists():
+        if self.use_cache and EMBEDDINGS_PATH.exists():
             print(f"Loading embedding parquet file from: {EMBEDDINGS_PATH}")
             embeddings_df = pd.read_parquet(EMBEDDINGS_PATH)
 
             if df.index.isin(embeddings_df.index).all():
                 return embeddings_df.loc[df.index]
-
         else:
             embeddings_df = None
 

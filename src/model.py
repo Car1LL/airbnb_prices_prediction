@@ -1,45 +1,40 @@
 import pandas as pd
 from preprocessing.inference_features import InferenceFeatureBuilder
-from utils.inference_xgb_pipeline import InferenceXGBoostPipeline
-from preprocessing.tree_preprocessor import create_tree_preprocessor
 from sklearn.model_selection import train_test_split
 from pathlib import Path
-from optuna_integration import XGBoostPruningCallback
-import xgboost as xgb
 import numpy as np
-import optuna
 from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_score
+from catboost import CatBoostRegressor, Pool
+from catboost.utils import get_gpu_device_count
+import joblib
 
 
 EMBEDDING_PCA_COMPONENTS=370
+DEVICE = "GPU" if get_gpu_device_count() > 0 else "CPU"
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 MODEL_DIR = BASE_DIR / "artifacts" / "model"
+BUILDER_PATH = MODEL_DIR / "builder.pkl"
 MODEL_DIR.mkdir(exist_ok=True, parents=True)
 
-MODEL_PATH = MODEL_DIR / "final_model"
-
+MODEL_PATH = MODEL_DIR / "final_model.cbm"
 DATASET_PATH = BASE_DIR / "dataset" / "Airbnb_Data.csv"
 
-DEVICE = 'cuda' if xgb.build_info()['USE_CUDA'] else 'cpu'
-ALPHA = 0.03
-N_TRIALS=250
-
-
 def main():
-    get_model()
+    get_evaluate_model()
 
-def get_model():
+def get_evaluate_model():
     df = pd.read_csv(DATASET_PATH)
+    df_copy = df.copy()
 
-    X = df.drop(columns=['log_price'])
-    y = df['log_price']
+    X = df_copy.drop(columns=['log_price'])
+    y = df_copy['log_price']
 
     X_train_raw, X_test_raw, y_train, y_test = train_test_split(
         X, y,
-        test_size=0.2,
-        random_state=42
+        random_state=42,
+        test_size=0.2
     )
 
     builder = InferenceFeatureBuilder(
@@ -50,30 +45,22 @@ def get_model():
 
     builder.fit(X_train_raw)
 
+    # Save builder 
+    joblib.dump(builder, BUILDER_PATH)
+    print(f"Feature Builder was successfully saved at: {BUILDER_PATH}")
+
     X_train = builder.transform(X_train_raw)
     X_test = builder.transform(X_test_raw)
-    
-    cat_features = X_train.select_dtypes(include=['string', 'object']).columns
-    tree_preprocessor = create_tree_preprocessor(cat_features)
 
-    X_train_processed = tree_preprocessor.fit_transform(X_train, y_train)
-    X_test_processed = tree_preprocessor.transform(X_test)
+    cat_features = X_train.select_dtypes(include=['string', 'object']).columns.tolist()
 
-    X_train_processed = X_train_processed.astype(np.float32)
-    X_test_processed = X_test_processed.astype(np.float32)
+    train_pool = Pool(X_train, label=y_train, cat_features=cat_features)
+    test_pool = Pool(X_test, label=y_test, cat_features=cat_features)
 
-    dtrain = xgb.DMatrix(X_train_processed, label=y_train)
+    catboost_pipeline = get_model(train_pool)
 
-    xgb_pipeline = train_model(
-        dtrain=dtrain,
-        preprocessor=tree_preprocessor,
-        X_train=X_train,
-        y_train=y_train,
-        feature_builder=builder
-    )
-
-    pred_train_log = xgb_pipeline.predict(X_train_raw)
-    pred_test_log = xgb_pipeline.predict(X_test_raw)
+    pred_train_log = catboost_pipeline.predict(train_pool)
+    pred_test_log = catboost_pipeline.predict(test_pool)
 
     evaluate(
         pred_train_log=pred_train_log,
@@ -82,8 +69,43 @@ def get_model():
         y_test=y_test
     )
 
-    print(f"\n\nModel is saved at: {MODEL_PATH}")
-    return xgb_pipeline
+    print(f"\n\nModel is located at: {MODEL_PATH}")
+
+def ensure_model():
+    if MODEL_PATH.exists() and BUILDER_PATH.exists():
+        print(f"Model and feature builder already exist.")
+        return
+    print(f"Model artifacts not found, Starting training")
+    get_evaluate_model()
+    
+def train_model(train_pool):
+    print(f"Training the model on device: {DEVICE}")
+
+    catboost_pipeline = CatBoostRegressor(
+        loss_function="RMSE",
+        eval_metric="RMSE",
+        random_seed=42,
+        verbose=False,
+        task_type=DEVICE
+    )
+
+    catboost_pipeline.fit(train_pool)
+    catboost_pipeline.save_model(MODEL_PATH)
+    print(f"Model was successfully trained and saved at: {MODEL_PATH}")
+
+    return catboost_pipeline
+
+def get_model(train_pool):
+    if MODEL_PATH.exists():
+        print(f"Loading existing model from: {MODEL_PATH}")
+
+        model = CatBoostRegressor()
+        model.load_model(MODEL_PATH)
+
+        return model
+    
+    return train_model(train_pool)
+
 
 def evaluate(pred_train_log, pred_test_log, y_train, y_test):
     pred_train = np.exp(pred_train_log)
@@ -104,121 +126,5 @@ def evaluate(pred_train_log, pred_test_log, y_train, y_test):
     print(f"Test RMSE: {test_RMSE:.2f}$ | Train RMSE: {train_RMSE:.2f}$")
     print(f"Test R2 Score: {test_r2:.2f} | Train R2 Score: {train_r2:.2f}")
 
-
-def train_model(dtrain, preprocessor, X_train, y_train, feature_builder):
-
-    model_exists = (
-        MODEL_PATH.with_suffix(".json").exists() and
-        MODEL_PATH.with_suffix(".joblib").exists() and
-        MODEL_PATH.with_suffix(".params").exists()
-    )
-
-    if model_exists:
-        print(f"Loading existing model...")
-        xgb_pipeline = InferenceXGBoostPipeline.load(MODEL_PATH)
-    else:
-        print(f"Training model...")
-        optuna.logging.set_verbosity(optuna.logging.WARNING)
-
-        study = optuna.create_study(
-            direction="minimize",
-            pruner=optuna.pruners.MedianPruner(n_startup_trials=10, n_warmup_steps=50, interval_steps=10)
-        )
-
-        study.optimize(
-            lambda trial: objective(trial, dtrain, alpha=ALPHA),
-            n_trials=N_TRIALS,
-            gc_after_trial=True,
-            callbacks=[optuna_callback]
-        )
-
-        best_num_boost_rounds = study.best_trial.user_attrs['best_num_boost_round']
-
-        best_params = {
-            **study.best_params,
-            "objective": "reg:squarederror",
-            "eval_metric": "rmse",
-            "tree_method": "hist",
-            "n_jobs": -1,
-            "seed": 42,
-            "verbosity": 0,
-            "device": DEVICE
-        }
-
-        xgb_pipeline = InferenceXGBoostPipeline(
-            preprocessor=preprocessor,
-            feature_builder=feature_builder
-        )
-        xgb_pipeline.fit(
-            X_train, y_train,
-            params=best_params,
-            num_boost_round=best_num_boost_rounds
-        )
-
-        xgb_pipeline.save(MODEL_PATH)
-
-    return xgb_pipeline
-    
-def objective(trial, dtrain, alpha=0.0):
-
-    params = {
-        "objective": "reg:squarederror",
-        "eval_metric": "rmse",
-        "tree_method": "hist",
-        "device": DEVICE,
-        
-        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.08, log=True),
-        "max_depth": trial.suggest_int("max_depth", 2, 6),
-        "subsample": trial.suggest_float("subsample", 0.6, 0.9),
-        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 0.8),
-        "gamma": trial.suggest_float("gamma", 0, 5),
-        "min_child_weight": trial.suggest_int("min_child_weight", 5, 20),
-        "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 5, log=True),
-        "reg_lambda": trial.suggest_float("reg_lambda", 1, 20, log=True),
-
-        "verbosity": 0,
-        "n_jobs": -1,
-        "seed": 42
-    }
-
-    cv_results = xgb.cv(
-        params=params,
-        dtrain=dtrain,
-        early_stopping_rounds=50,
-        num_boost_round=1000,
-        nfold=3,
-        metrics="rmse",
-        seed=42,
-        verbose_eval=False,
-        shuffle=True,
-        callbacks=[XGBoostPruningCallback(trial, "test-rmse")]
-    )
-
-    trial.set_user_attr(
-        "best_num_boost_round",
-        len(cv_results)
-    )
-
-    test_rmse = cv_results['test-rmse-mean'].iloc[-1]
-    train_rmse = cv_results['train-rmse-mean'].iloc[-1]
-
-    gap = (test_rmse - train_rmse) / test_rmse
-    
-    trial.set_user_attr("gap", gap)
-    trial.set_user_attr("train_rmse", train_rmse)
-    trial.set_user_attr("test_rmse", test_rmse)
-
-    score = test_rmse + alpha * gap
-
-    return score
-
-def optuna_callback(study, trial):
-    print(
-        f"Trial {trial.number + 1}/{N_TRIALS} "
-        f"| Score: {trial.value:.4f} "
-        f"| Best: {study.best_value:.4f}"
-    )
-
 if __name__ == "__main__":
     main()
-
